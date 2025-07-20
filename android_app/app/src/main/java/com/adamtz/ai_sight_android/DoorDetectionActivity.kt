@@ -8,6 +8,7 @@ import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -48,40 +49,36 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
     // Triple tap detection variables
     private var tapCount = 0
     private var lastTapTime = 0L
-    private val tripleTapTimeout = 1000L // 1 second window for triple tap
+    private val tripleTapTimeout = 1000L // 1 second window
 
+    // Permission request config
     companion object {
         private const val TAG = "DoorDetectionActivity"
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 
+    // Activity lifecycle safeguard
+    private var activityActive = true
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityDoorDetectionBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Initialize SoundPool with proper AudioAttributes
+        // SoundPool setup
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
-
         soundPool = SoundPool.Builder()
             .setMaxStreams(1)
             .setAudioAttributes(audioAttributes)
             .build()
-
-        // Load sounds and listen for completion
         soundPool.setOnLoadCompleteListener { _, _, status ->
-            if (status == 0) {
-                soundsLoaded = true
-                Log.d(TAG, "SoundPool sounds loaded successfully")
-            } else {
-                Log.e(TAG, "SoundPool sound loading failed")
-            }
+            soundsLoaded = status == 0
+            if (!soundsLoaded) Log.e(TAG, "SoundPool loading failed")
         }
-
         searchingSoundId = soundPool.load(this, R.raw.searching, 1)
         popSoundId = soundPool.load(this, R.raw.pop, 1)
         leftSoundId = soundPool.load(this, R.raw.left, 1)
@@ -99,32 +96,32 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
 
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // Triple tap listener on root view to exit
+        // Triple tap exit
         binding.root.setOnClickListener {
             val currentTime = SystemClock.uptimeMillis()
-            if (currentTime - lastTapTime > tripleTapTimeout) {
-                tapCount = 1
-            } else {
-                tapCount++
-            }
+            tapCount = if (currentTime - lastTapTime > tripleTapTimeout) 1 else tapCount + 1
             lastTapTime = currentTime
-
             if (tapCount == 3) {
+                // Cleanup before leaving
+                cleanupResources()
                 val intent = Intent(this, HomeActivity::class.java)
                 intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 startActivity(intent)
                 finish()
-                tapCount = 0 // Reset tap count after triple tap detected
+                tapCount = 0
             }
         }
-
     }
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
-            cameraProvider = cameraProviderFuture.get()
-            bindCameraUseCases()
+            try {
+                cameraProvider = cameraProviderFuture.get()
+                bindCameraUseCases()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error initializing camera: ${e.message}")
+            }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -149,6 +146,10 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
             .build()
 
         imageAnalyzer?.setAnalyzer(cameraExecutor) { imageProxy ->
+            if (!activityActive) {
+                imageProxy.close()
+                return@setAnalyzer
+            }
             val bitmapBuffer = Bitmap.createBitmap(
                 imageProxy.width,
                 imageProxy.height,
@@ -156,21 +157,14 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
             )
             imageProxy.use { bitmapBuffer.copyPixelsFromBuffer(imageProxy.planes[0].buffer) }
             imageProxy.close()
-
-            val matrix = Matrix().apply {
-                postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-            }
-
+            val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
             val rotatedBitmap = Bitmap.createBitmap(
-                bitmapBuffer, 0, 0, bitmapBuffer.width, bitmapBuffer.height,
-                matrix, true
+                bitmapBuffer, 0, 0, bitmapBuffer.width, bitmapBuffer.height, matrix, true
             )
-
             detector.detect(rotatedBitmap)
         }
 
         cameraProvider.unbindAll()
-
         try {
             camera = cameraProvider.bindToLifecycle(
                 this,
@@ -185,7 +179,7 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
     }
 
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -194,27 +188,38 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
             if (allPermissionsGranted()) {
                 startCamera()
             } else {
-                android.widget.Toast.makeText(this, "Permissions not granted by the user.", android.widget.Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Permissions not granted by the user.", Toast.LENGTH_SHORT).show()
                 finish()
             }
         }
     }
 
+    private fun cleanupResources() {
+        try {
+            cameraProvider?.unbindAll() // Unbind all use cases
+            imageAnalyzer?.clearAnalyzer() // Clear image analysis
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during cleanup", e)
+        }
+
+        cameraExecutor.shutdownNow() // Shutdown executor
+        soundPool.release() // Release SoundPool resources
+    }
+
+
     override fun onDestroy() {
         super.onDestroy()
-        detector.clear()
-        cameraExecutor.shutdown()
-        soundPool.release()
+        cleanupResources()
     }
 
     override fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long) {
+        if (!activityActive) return
         runOnUiThread {
             binding.inferenceTime.text = "${inferenceTime}ms"
             binding.overlay.apply {
                 setResults(boundingBoxes)
                 invalidate()
             }
-
             if (boundingBoxes.isEmpty()) {
                 if (!isSearchingSoundPlaying && soundsLoaded) {
                     searchingStreamId = soundPool.play(searchingSoundId, 1f, 1f, 1, -1, 1f)
@@ -231,20 +236,16 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
                     soundPool.play(popSoundId, 1f, 1f, 1, 0, 1f)
                 }
                 lastDoorDetected = true
-
                 val doorBox = boundingBoxes[0]
                 val viewWidth = binding.viewFinder.width.toFloat()
                 val centerX = ((doorBox.x1 + doorBox.x2) / 2f) * viewWidth
-
                 val leftThreshold = viewWidth / 3
                 val rightThreshold = 2 * viewWidth / 3
-
                 val direction = when {
                     centerX < leftThreshold -> "left"
                     centerX > rightThreshold -> "right"
                     else -> "center"
                 }
-
                 if (direction != lastDirection && soundsLoaded) {
                     when (direction) {
                         "left" -> soundPool.play(leftSoundId, 1f, 1f, 1, 0, 1f)
@@ -258,6 +259,7 @@ class DoorDetectionActivity : AppCompatActivity(), Detector.DetectorListener {
     }
 
     override fun onEmptyDetect() {
+        if (!activityActive) return
         runOnUiThread {
             binding.overlay.setResults(emptyList())
             binding.overlay.invalidate()

@@ -1,119 +1,115 @@
 package com.adamtz.ai_sight_android
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.os.Handler
+import android.os.Looper
 import android.view.MotionEvent
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import com.adamtz.ai_sight_android.databinding.ActivityHomeBinding
+import android.content.Context
+import android.os.VibrationEffect
+import android.os.Vibrator
+
 
 class HomeActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityHomeBinding
-    private lateinit var speechRecognizer: SpeechRecognizer
-    private lateinit var recognizerIntent: Intent
-    private var isListening = false
+    private var mediaPlayer: MediaPlayer? = null
 
-    private val REQUEST_MIC_PERMISSION = 1001
+    // Enum representing the modes to improve readability
+    enum class Mode(val audioResId: Int, val displayName: String) {
+        MONEY(R.raw.money_mode, "Money Mode"),
+        DOOR(R.raw.door_mode, "Door Mode")
+    }
+
+    private var currentMode = Mode.MONEY
+
+    private val LONG_PRESS_TIMEOUT = 600L
+    private var isLongPress = false
+    private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityHomeBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MIC_PERMISSION)
-        }
+        // Play initial mode audio (Money mode)
+        playModeAudio(currentMode.audioResId)
+        updateCurrentModeText()  // Update the displayed mode text
 
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-        speechRecognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {
-                isListening = false
-                runOnUiThread { binding.btnSpeak.text = "Hold to Speak" }
-            }
-            override fun onError(error: Int) {
-                isListening = false
-                runOnUiThread { binding.btnSpeak.text = "Hold to Speak" }
-            }
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    val spokenText = matches[0].trim()
-                    handleVoiceCommand(spokenText)
-                }
-            }
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        }
-
-        binding.btnSpeak.setOnTouchListener { _, event ->
+        binding.root.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    if (!isListening) {
-                        isListening = true
-                        speechRecognizer.startListening(recognizerIntent)
-                        binding.btnSpeak.text = "Listening..."
-                    }
+                    isLongPress = false
+                    handler.postDelayed({
+                        isLongPress = true
+                        handleLongPress()
+                    }, LONG_PRESS_TIMEOUT)
                     true
                 }
+
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isListening) {
-                        speechRecognizer.stopListening()
-                        binding.btnSpeak.text = "Hold to Speak"
-                        isListening = false
+                    handler.removeCallbacksAndMessages(null)
+                    if (!isLongPress) {
+                        handleSingleTap()
+                        binding.root.performClick()
                     }
                     true
                 }
+
                 else -> false
             }
         }
     }
 
-    private fun handleVoiceCommand(command: String) {
-        when (command) {
-            "كم معي", "كم ترى من المال" -> {
-                val intent = Intent(this, MoneyCountingActivity::class.java)
-                startActivity(intent)
-            }
-            "اين الباب", "وين الباب" -> {
-                val intent = Intent(this, DoorDetectionActivity::class.java)
-                startActivity(intent)
-            }
-            else -> {
-                runOnUiThread {
-                    android.widget.Toast.makeText(this, "أمر غير معروف: $command", android.widget.Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+    private fun handleSingleTap() {
+        // Switch mode
+        currentMode = if (currentMode == Mode.MONEY) Mode.DOOR else Mode.MONEY
+        playModeAudio(currentMode.audioResId)
+        updateCurrentModeText()  // Update the UI with the new mode text
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_MIC_PERMISSION) {
-            if (grantResults.isEmpty() || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
-                android.widget.Toast.makeText(this, "مطلوب إذن الميكروفون", android.widget.Toast.LENGTH_LONG).show()
-            }
+    private fun handleLongPress() {
+        vibrateShort()
+        val intent = when (currentMode) {
+            Mode.MONEY -> Intent(this, MoneyCountingActivity::class.java)
+            Mode.DOOR -> Intent(this, DoorDetectionActivity::class.java)
         }
+
+        handler.postDelayed({
+            startActivity(intent)
+        }, 700)
+    }
+
+    private fun playModeAudio(audioResId: Int) {
+        mediaPlayer?.release()
+        mediaPlayer = MediaPlayer.create(this, audioResId)
+        mediaPlayer?.start()
+    }
+
+    private fun updateCurrentModeText() {
+        // Update the current mode text in the UI
+        binding.currentModeText.text = "Current Mode: ${currentMode.displayName}"
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        speechRecognizer.destroy()
+        mediaPlayer?.release()
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    private fun vibrateShort() {
+        val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        if (vibrator.hasVibrator()) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                vibrator.vibrate(100)
+            }
+        }
     }
 }
+
+

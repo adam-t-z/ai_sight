@@ -28,36 +28,25 @@ class MoneyCountingActivity : AppCompatActivity(), Detector.DetectorListener, Te
 
     private lateinit var binding: ActivityMoneyCountingBinding
     private val isFrontCamera = false
-
     private var preview: Preview? = null
     private var imageAnalyzer: ImageAnalysis? = null
     private var camera: Camera? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var detector: Detector
-
     private lateinit var cameraExecutor: ExecutorService
-
     private lateinit var tts: TextToSpeech
     private val handler = Handler(Looper.getMainLooper())
     private var totalAmountToSpeak: String = "0"
-
     private var isFlashOn = false
     private var noMoneyDetectedTimestamp = 0L
-
-    // Cooldown to prevent TTS spam (e.g., 2 seconds)
     private var lastSpeakTime = 0L
     private val speakCooldownMillis = 4000L
-
-    // Variables for repeating speech while money is detected
     private var isMoneyDetected = false
-    private val repeatSpeakInterval = 1000L // 1 second
+    private val repeatSpeakInterval = 1000L
     private val repeatSpeakHandler = Handler(Looper.getMainLooper())
-
-    // Variables for triple tap detection to exit
     private var tapCount = 0
     private var lastTapTime = 0L
-    private val tripleTapTimeout = 1000L // 1 second window for triple tap
-
+    private val tripleTapTimeout = 1000L
     private val repeatSpeakRunnable = object : Runnable {
         override fun run() {
             val currentTime = SystemClock.uptimeMillis()
@@ -72,13 +61,11 @@ class MoneyCountingActivity : AppCompatActivity(), Detector.DetectorListener, Te
                 }
                 val textToSpeak = "$formattedAmount dinars"
                 tts.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, "MoneyCountID")
-
                 lastSpeakTime = currentTime
             }
             repeatSpeakHandler.postDelayed(this, 500)
         }
     }
-
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,59 +82,85 @@ class MoneyCountingActivity : AppCompatActivity(), Detector.DetectorListener, Te
         }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
-
         tts = TextToSpeech(this, this)
 
-        // Triple tap listener on root view to exit
+        // Triple tap listener to handle exit and cleanup
         binding.root.setOnClickListener {
             val currentTime = SystemClock.uptimeMillis()
-            if (currentTime - lastTapTime > tripleTapTimeout) {
-                tapCount = 1
-            } else {
-                tapCount++
-            }
+            tapCount = if (currentTime - lastTapTime > tripleTapTimeout) 1 else tapCount + 1
             lastTapTime = currentTime
 
             if (tapCount == 3) {
+                cleanupResources()  // Perform cleanup before exiting
                 val intent = Intent(this, HomeActivity::class.java)
                 intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                Log.d("MoneyCountingActivity", "Triple tap detected, starting HomeActivity")
                 startActivity(intent)
-                finish()  // Add this line to finish MoneyCountingActivity
-                Log.d("MoneyCountingActivity", "HomeActivity started and MoneyCountingActivity finished")
+                finish()  // Finish the current activity
+                Log.d("MoneyCountingActivity", "Triple tap detected, starting HomeActivity")
             }
         }
-
-
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale.US)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e(TAG, "TTS language not supported")
+    private fun cleanupResources() {
+        try {
+            // Unbind all camera use cases to free camera resources
+            cameraProvider?.unbindAll()
+
+            // Clear image analysis and stop TTS
+            imageAnalyzer?.clearAnalyzer()
+            cameraExecutor.shutdownNow()
+
+            // Turn off the flashlight if it's on
+            if (isFlashOn) {
+                toggleFlash(false)
             }
-        } else {
-            Log.e(TAG, "TTS initialization failed")
+
+            // Stop TTS and release resources
+            tts.stop()
+            tts.shutdown()
+
+            // Remove pending callbacks to avoid memory leaks
+            handler.removeCallbacksAndMessages(null)
+            repeatSpeakHandler.removeCallbacks(repeatSpeakRunnable)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during cleanup", e)
         }
+    }
+
+    private fun toggleFlash(turnOn: Boolean) {
+        camera?.cameraControl?.enableTorch(turnOn)
+        isFlashOn = turnOn
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        detector.clear()
-        cameraExecutor.shutdown()
-        tts.stop()
-        tts.shutdown()
-        handler.removeCallbacksAndMessages(null)
-        repeatSpeakHandler.removeCallbacks(repeatSpeakRunnable)
+        cleanupResources()  // Ensure cleanup when the activity is destroyed
+    }
+
+    override fun onPause() {
+        super.onPause()
+        cleanupResources()  // Ensure cleanup when the activity is paused
+    }
+
+    override fun onStop() {
+        super.onStop()
+        cleanupResources()  // Ensure cleanup when the activity is stopped
     }
 
     private fun startCamera() {
+        // Get an instance of the camera provider
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
-            cameraProvider = cameraProviderFuture.get()
-            bindCameraUseCases()
-        }, ContextCompat.getMainExecutor(this))
+            try {
+                // Initialize cameraProvider and bind use cases
+                cameraProvider = cameraProviderFuture.get()
+                bindCameraUseCases()
+            } catch (e: Exception) {
+                // Log the error if camera initialization fails
+                Log.e(TAG, "Error initializing camera: ${e.message}")
+            }
+        }, ContextCompat.getMainExecutor(this)) // Run on main thread
     }
 
     private fun bindCameraUseCases() {
@@ -215,25 +228,18 @@ class MoneyCountingActivity : AppCompatActivity(), Detector.DetectorListener, Te
         }
     }
 
-
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
     }
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        if (it[Manifest.permission.CAMERA] == true) {
-            startCamera()
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (allPermissionsGranted()) {
-            startCamera()
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts.setLanguage(Locale.US)
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e(TAG, "TTS language not supported or missing data")
+            }
         } else {
-            requestPermissionLauncher.launch(REQUIRED_PERMISSIONS)
+            Log.e(TAG, "TTS initialization failed")
         }
     }
 
@@ -252,6 +258,7 @@ class MoneyCountingActivity : AppCompatActivity(), Detector.DetectorListener, Te
             }
         }
     }
+
     override fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long) {
         runOnUiThread {
             binding.inferenceTime.text = "${inferenceTime}ms"
@@ -289,11 +296,6 @@ class MoneyCountingActivity : AppCompatActivity(), Detector.DetectorListener, Te
                 }
             }
         }
-    }
-
-    private fun toggleFlash(turnOn: Boolean) {
-        camera?.cameraControl?.enableTorch(turnOn)
-        isFlashOn = turnOn
     }
 
     companion object {
